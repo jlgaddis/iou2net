@@ -1,3 +1,8 @@
+iou2net.pl (v0.21)
+
+	* changed socket_base handling after receiving hint that "1000" is
+	  the uid that IOU is started with
+
 iou2net.pl (v0.2)
 
 	* added pcap filter to allow for better performance on busy nics

@@ -6,12 +6,17 @@ use Getopt::Long;
 use Net::Pcap;
 use IO::Socket;
 
-my $version = "v0.2";
-my $version_date = "24-Jan-2011";
+my $version = "v0.21";
+my $version_date = "26-Jan-2011";
 
 ###################################################################################
 # CHANGES
 # =======
+#
+# v0.21, 26-Jan-2011
+# -----------------
+# - changed socket_base handling after receiving hint that "1000" is the uid
+#   that IOU is started with ;-)
 #
 # v0.2, 24-Jan-2011
 # -----------------
@@ -63,7 +68,7 @@ my $iou_header;
 my $iface;
 my $netmap_file = "./NETMAP";
 my $netmap_handle;
-my $socket_base = "/tmp/netio1000";	# looks like IOU always uses this directory for domain sockets
+my $socket_base;
 my $pseudo_instance;
 my $pseudo_instance_interface_major;
 my $pseudo_instance_interface_minor;
@@ -79,6 +84,15 @@ GetOptions(	'help'		=>	sub{ print"$help"; exit(0); },
 );
 
 die "\nPlease provide -i and -p!\n$help" unless ($iface && $pseudo_instance);		
+
+# socket directory is a directory below $TMPDIR (/tmp), composed of "netio" plus
+# uid of the user that runs the iou binary
+# since we assume this script gets invoked with sudo by most people:
+# try to be smart about getting real UID, $< does not (always?) return real uid when using sudo
+
+$socket_base = $ENV{SUDO_UID};
+$socket_base = $< unless (defined $socket_base);        # apparently not started with sudo
+$socket_base = "/tmp/netio$socket_base";
 
 open (netmap_handle, $netmap_file) or die "Can't open netmap file $netmap_file\n";
 
