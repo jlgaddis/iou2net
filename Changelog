@@ -1,3 +1,13 @@
+iou2net.pl (v0.4)
+
+	* for frame read, switched from fork to select
+	* added bridging via udp links and tap interfaces
+	* encoding issues hopefully fixed
+	* more sane construction of IOU header and MAC address
+	* verbose output
+	* packet trace output (MAC headers)
+	* writing traffic to pcap file
+
 iou2net.pl (v0.31)
 
 	* MAC address is now in "ether" format (bytes separated with ":") for
