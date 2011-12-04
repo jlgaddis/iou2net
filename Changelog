@@ -1,3 +1,10 @@
+iou2net.pl (v0.5)
+
+	* changed capture filter to allow for l2iou MAC addresses (more generic
+	  approach)
+	* added -m option to bypass MAC filtering completely or to allow to
+	  specify own MAC address
+
 iou2net.pl (v0.4)
 
 	* for frame read, switched from fork to select

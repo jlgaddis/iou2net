@@ -9,12 +9,18 @@ use IO::Socket;
 use IO::File;
 use Time::HiRes qw(gettimeofday);
 
-my $version      = "v0.4";
-my $version_date = "22-Apr-2011";
+my $version      = "v0.5";
+my $version_date = "20-Sep-2011";
 
 ###################################################################################
 # CHANGES
 # =======
+#
+# v0.5, 20-Sep-2011
+# -----------------
+# - changed capture filter to allow for l2iou MAC addresses (more generic approach)
+# - added -m option to bypass MAC filtering completely or to allow to specify own
+#   MAC address
 #
 # v0.4, 22-Apr-2011
 # -----------------
@@ -119,6 +125,13 @@ NOTE:	-> You _must_ launch IOU before starting this script.
 	Port numbers are always from a local (IOU) perspective, therefore
 	they are the reverse of what gets defined at the target system.
 
+-m <MAC address> (PCAP mode only)
+	If <MAC address> is supplied, this address is used to build the
+	capture filter. If <MAC address> is not specified, no capture filter
+	will applied. This option should only be used for testing/debugging,
+	because the default capture filter should work for any l3/l2iou
+	instance out of the box.
+
 CAVEATS: For now, you need to use x/y interface format in the NETMAP file, at 
 least for the mapping this script requires. Also, for bridging multiple router
 interfaces, separate instances of this script must be launched, and you need
@@ -159,6 +172,7 @@ my $tap_handle;
 my $cap_file;
 my $cap_handle;
 my $cap_dumper;
+my $user_mac;
 
 GetOptions(
     'help' => sub { print "$help"; exit(0); },
@@ -169,7 +183,8 @@ GetOptions(
     'p=i'  => \$pseudo_instance,
     'u=s'  => \$udp_conn,
     't=s'  => \$tap,
-    'f=s'  => \$cap_file
+    'f=s'  => \$cap_file,
+    'm:s'  => \$user_mac
 );
 
 print "iou2net.pl, Version $version, $version_date.\n";
@@ -198,9 +213,8 @@ while (<netmap_handle>) {
 
     # stop when there is a match for our pseudo instance ID as the destination
     next
-      if !(
-              $_ =~
-m/^\d+:\d+\/\d+@[\w-]+[ \t]+$pseudo_instance:\d+\/\d+@[\w-]+(\s|\t)*$/
+      if !( $_ =~
+        m/^\d+:\d+\/\d+@[\w-]+[ \t]+$pseudo_instance:\d+\/\d+@[\w-]+(\s|\t)*$/
       );
     my $inputline = $_;
     chomp($inputline);
@@ -238,9 +252,9 @@ unlink "$socket_base/$pseudo_instance";
 
 # create socket for IOU pseudo instance
 $iou_pseudo_sock = IO::Socket::UNIX->new(
-    Type     => SOCK_DGRAM,
-    Listen   => 5,
-    Local    => "$socket_base/$pseudo_instance"
+    Type   => SOCK_DGRAM,
+    Listen => 5,
+    Local  => "$socket_base/$pseudo_instance"
 ) or die "Can't create IOU pseudo socket\n";
 
 # availability to read shall be queried through select()
@@ -297,7 +311,12 @@ if ( defined $cap_file ) {
 if ( defined $iface ) {
     print "Working in pcap mode.\n" if $verbose;
 
-    # construction of IOU MAC address for external connectivity
+    # bind to network interface, promiscuous mode
+    $pcap = Net::Pcap::open_live( $iface, 1522, 1, 1, \$err );
+    die "pcap: can't open device $iface: $err (are you root?)\n"
+      unless ( defined $pcap );
+
+    # construction of IOU MAC address for external connectivity (L3IOU)
     # Pos (byte)            value
     # ==============================================================
     # 0 (high nibble)       from IOU instance ID (2 bytes, only 10 bits used),
@@ -315,33 +334,58 @@ if ( defined $iface ) {
     # $mac += ($iou_interface_minor << 4) + $iou_interface_major;
 
     my $macstring;
-    $macstring = pack( "CH6CC",
-        ( ( $iou_instance >> 7 & 6 ) << 8 ) + 0xE,
-        unpack( "xH6", pack( "N", 0xFF000000 ^ $uid ) ),
-        $iou_instance & 0xFF,
-        ( $iou_interface_minor << 4 ) | $iou_interface_major );
 
-    $macstring = uc( join( ":", unpack( "(H2)*", $macstring ) ) );
+    if ( defined $user_mac ) {
+        if ($user_mac) {
+            $macstring = $user_mac;
+        }
+        else {
+            $macstring = "";
+        }
+    }
+    else {
+        $macstring = pack( "CH6CC",
+            ( ( $iou_instance >> 7 & 6 ) << 8 ) + 0xE,
+            unpack( "xH6", pack( "N", 0xFF000000 ^ $uid ) ),
+            $iou_instance & 0xFF,
+            ( $iou_interface_minor << 4 ) | $iou_interface_major );
 
-    print "Using MAC $macstring.\n" if $verbose;
+        $macstring = uc( join( ":", unpack( "(H2)*", $macstring ) ) );
+    }
 
-    # bind to network interface, promiscuous mode
-    $pcap = Net::Pcap::open_live( $iface, 1522, 1, 1, \$err );
-    die "pcap: can't open device $iface: $err (are you root?)\n"
-      unless ( defined $pcap );
+    if ($macstring) {
+        print "Using MAC $macstring.\n" if $verbose;
 
-    # build a capture filter for IOU interface MAC address
-    # this will match only what is destined to $macstring, plus multicasts
-    # and broadcasts
-    Net::Pcap::compile( $pcap, \$pcap_filter,
-        '(ether[0] & 1 = 1) or (ether dst ' . $macstring . ')',
-        0, 0xFFFFFFFF )
-      && die 'Unable to compile capture filter';
-    Net::Pcap::setfilter( $pcap, $pcap_filter )
-      && die 'Unable to assign capture filter';
-    print "Capture filter set: (ether[0] & 1 = 1) or (ether dst '"
-      . $macstring . "')\n"
-      if $verbose;
+        # build a capture filter for IOU interface MAC address
+        # this will match only what is destined to $macstring, plus multicasts
+        # and broadcoasts
+        # for L2IOU, traffic destined to OIDs 02:<UID>:<UID> and AA:BB:CC is
+        # included in the filter, too
+
+        Net::Pcap::compile(
+            $pcap, \$pcap_filter,
+            '(ether[0] & 1 = 1) or 
+		(ether dst ' . $macstring . ') or 	
+		(ether[0] = 0x02 and ether[1:2] = 0x'
+              . unpack( "H4", pack( "n", $uid ) ) . ') or 
+		(ether[0] = 0xaa and ether[1:2] = 0xbbcc)',
+            0, 0xFFFFFFFF
+        ) && die 'Unable to compile capture filter';
+
+        Net::Pcap::setfilter( $pcap, $pcap_filter )
+          && die 'Unable to assign capture filter';
+
+        print "Capture filter set: (ether[0] & 1 = 1) or (ether dst '"
+          . $macstring . "') or
+	            (ether[0] = 0x02 and ether[1:2] = 0x"
+          . unpack( "H4", pack( "n", $uid ) ) . ") or 
+	            (ether[0] = 0xaa and ether[1:2] = 0xbbcc)\n"
+          if $verbose;
+
+    }
+    else {
+        print "No capture filter set (empty -m option)\n" if $verbose;
+    }
 
     print
 "Forwarding frames between interface $iface and IOU instance $iou_instance, int $iou_interface_major/$iou_interface_minor (MAC: $macstring) -  press ^C to exit\n";
@@ -421,7 +465,7 @@ elsif ( defined $udp_conn ) {
             if ( $socket == $iou_pseudo_sock ) {
 
                 # IOU frame received via pseudo ID socket
-                $iou_pseudo_sock->recv( $iou_recv_data, 1522 );
+                $iou_pseudo_sock->recv( $iou_recv_data, 1580 );
                 log_iou_frame( "R:I->U", $iou_recv_data ) if $debug;
 
                 $iou_recv_data = unpack( "x8a*", $iou_recv_data );
@@ -432,7 +476,7 @@ elsif ( defined $udp_conn ) {
                 log_frame( "S:I->U", $iou_recv_data ) if $debug;
             }
             else {
-                $udp_listener->recv( $iou_recv_data, 1522 );
+                $udp_listener->recv( $iou_recv_data, 1580 );
                 write_pcap_dump($iou_recv_data) if $cap_dumper;
                 log_frame( "R:U->I", $iou_recv_data ) if $debug;
 
