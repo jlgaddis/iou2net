@@ -1,3 +1,7 @@
+iou2net.pl (v0.2)
+
+	* added pcap filter to allow for better performance on busy nics
+
 iou2net.pl (v0.1)
 
 	* initial release
