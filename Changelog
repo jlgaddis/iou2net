@@ -1,3 +1,8 @@
+iou2net.pl (v0.31)
+
+	* MAC address is now in "ether" format (bytes separated with ":") for
+	  building the capture filter
+
 iou2net.pl (v0.3)
 
 	* better capture filter handling, after understanding how IOU generates

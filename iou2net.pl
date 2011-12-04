@@ -6,12 +6,17 @@ use Getopt::Long;
 use Net::Pcap;
 use IO::Socket;
 
-my $version = "v0.3";
-my $version_date = "27-Jan-2011";
+my $version = "v0.31";
+my $version_date = "28-Jan-2011";
 
 ###################################################################################
 # CHANGES
 # =======
+#
+# v0.31, 28-Jan-2011
+# -----------------
+# - MAC address is now in "ether" format (bytes separated with ":") for building
+#   the capture filter
 #
 # v0.3, 27-Jan-2011
 # -----------------
@@ -188,8 +193,8 @@ $SIG{INT} = \&pcap_sigint;
 # construction of IOU MAC address for external connectivity
 # Pos (byte)		value
 # ==============================================================
-# 0 (high nibble)	from IOU instance ID (2 bytes, only 10 bits used), the two least
-# 			significant bits are taken and shifted one bit left (dont interfere with multicast MACs)
+# 0 (high nibble)	from IOU instance ID (2 bytes, only 10 bits used), the two least significant bits from
+# 			the high byte are taken and shifted one bit left (dont interfere with multicast MAC definition)
 # 0 (low nibble)	always 0xE
 # 1 - 3			UID of the user that runs the IOU instance 
 # 4			low byte of the IOU instance ID
@@ -209,6 +214,8 @@ $macstring .= "e";
 $macstring .= sprintf "%06x", ($uid);
 $macstring .= sprintf "%02x", (($iou_instance & 0xFF));
 $macstring .= sprintf "%02x", (($iou_interface_minor << 4) + $iou_interface_major);
+
+$macstring = join(":", unpack ("(A2)*", $macstring));
 
 # build a capture filter for IOU interface MAC address
 # this will match only what is destined to $macstring, plus multicasts and broadcasts
