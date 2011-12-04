@@ -6,12 +6,18 @@ use Getopt::Long;
 use Net::Pcap;
 use IO::Socket;
 
-my $version = "v0.21";
-my $version_date = "26-Jan-2011";
+my $version = "v0.3";
+my $version_date = "27-Jan-2011";
 
 ###################################################################################
 # CHANGES
 # =======
+#
+# v0.3, 27-Jan-2011
+# -----------------
+# - better capture filter handling, after understanding how IOU generates
+#   MAC addresses (related code is still ugly)
+# - hostnames with hyphen are now accepted
 #
 # v0.21, 26-Jan-2011
 # -----------------
@@ -68,6 +74,7 @@ my $iou_header;
 my $iface;
 my $netmap_file = "./NETMAP";
 my $netmap_handle;
+my $uid;
 my $socket_base;
 my $pseudo_instance;
 my $pseudo_instance_interface_major;
@@ -75,6 +82,7 @@ my $pseudo_instance_interface_minor;
 my $iou_instance;
 my $iou_interface_major;
 my $iou_interface_minor;
+my $mac;
 my $pcap_filter;
 
 GetOptions(	'help'		=>	sub{ print"$help"; exit(0); },
@@ -90,9 +98,9 @@ die "\nPlease provide -i and -p!\n$help" unless ($iface && $pseudo_instance);
 # since we assume this script gets invoked with sudo by most people:
 # try to be smart about getting real UID, $< does not (always?) return real uid when using sudo
 
-$socket_base = $ENV{SUDO_UID};
-$socket_base = $< unless (defined $socket_base);        # apparently not started with sudo
-$socket_base = "/tmp/netio$socket_base";
+$uid = $ENV{SUDO_UID};
+$uid = $< unless (defined $uid);        # apparently not started with sudo
+$socket_base = "/tmp/netio$uid";
 
 open (netmap_handle, $netmap_file) or die "Can't open netmap file $netmap_file\n";
 
@@ -100,12 +108,12 @@ open (netmap_handle, $netmap_file) or die "Can't open netmap file $netmap_file\n
 while (<netmap_handle>)
 {
 	# stop when there is a match for our pseudo instance ID as the destination
-	next if !($_ =~ m/^\d+:\d+\/\d+@\w+[ \t]+$pseudo_instance:\d+\/\d+@\w+(\s|\t)*$/);	
+	next if !($_ =~ m/^\d+:\d+\/\d+@[\w-]+[ \t]+$pseudo_instance:\d+\/\d+@[\w-]+(\s|\t)*$/);	
  	my $inputline = $_;
         chomp($inputline);
 
 	# we just ignore any hostname statements
-	$inputline =~ s/\@\w+//g;
+	$inputline =~ s/\@[\w-]+//g;
 
         my @connline = split (/[ \t]+/, $inputline);
         $connline[0] =~ s/(\s\t)*//g;
@@ -177,12 +185,37 @@ if ($iou_pseudo_fork == 0)
 # provide a clean exit when user sends break
 $SIG{INT} = \&pcap_sigint;
 
-# build a packet filter for IOU MAC OID
-# this will match only what is destined to 0E:00:03:E8, plus multicast and broadcasts
-Net::Pcap::compile($pcap, \$pcap_filter, '(ether[0] & 1 = 1) or (ether[0:4] = 0x0e0003e8)', 0, 0xFFFFFFFF) && die 'Unable to compile capture filter';
+# construction of IOU MAC address for external connectivity
+# Pos (byte)		value
+# ==============================================================
+# 0 (high nibble)	from IOU instance ID (2 bytes, only 10 bits used), the two least
+# 			significant bits are taken and shifted one bit left (dont interfere with multicast MACs)
+# 0 (low nibble)	always 0xE
+# 1 - 3			UID of the user that runs the IOU instance 
+# 4			low byte of the IOU instance ID
+# 5			interface ID
+#
+# for x64 systems, binary math works well, like
+# $mac = (((($iou_instance & 0x0300) << 1 ) << 36 ) + 0xE0000000000 );
+# $mac += $uid << 16;
+# $mac += ($iou_instance & 0xFF) << 8;
+# $mac += ($iou_interface_minor << 4) + $iou_interface_major;
+#
+# apparently I'm too stupid to deal with Math::BigInt for 32bit system compatibility, so I use string operations
+ 
+my $macstring;
+$macstring = sprintf "%x", (($iou_instance >> 7 & 6));
+$macstring .= "e";
+$macstring .= sprintf "%06x", ($uid);
+$macstring .= sprintf "%02x", (($iou_instance & 0xFF));
+$macstring .= sprintf "%02x", (($iou_interface_minor << 4) + $iou_interface_major);
+
+# build a capture filter for IOU interface MAC address
+# this will match only what is destined to $macstring, plus multicasts and broadcasts
+Net::Pcap::compile($pcap, \$pcap_filter, '(ether[0] & 1 = 1) or (ether dst ' . $macstring . ')', 0, 0xFFFFFFFF) && die 'Unable to compile capture filter';
 Net::Pcap::setfilter($pcap, $pcap_filter) && die 'Unable to assign capture filter';
 
-print "Forwarding frames between interface $iface and IOU instance $iou_instance, int $iou_interface_major/$iou_interface_minor -  press ^C to exit\n";
+print "Forwarding frames between interface $iface and IOU instance $iou_instance, int $iou_interface_major/$iou_interface_minor (MAC: $macstring) -  press ^C to exit\n";
 
 # define infinite loop for capturing network traffic
 my $loop_exit = Net::Pcap::loop($pcap, -1, \&recv_loop, $pcap_recv_data);
