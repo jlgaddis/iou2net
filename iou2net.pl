@@ -8,6 +8,7 @@ use IO::Select;
 use IO::Socket;
 use IO::File;
 use Time::HiRes qw(gettimeofday);
+use threads;
 
 my $version      = "v0.5";
 my $version_date = "20-Sep-2011";
@@ -132,6 +133,9 @@ NOTE:	-> You _must_ launch IOU before starting this script.
 	because the default capture filter should work for any l3/l2iou
 	instance out of the box.
 
+-l 
+	Use linkstate signals, if the IOU instance was also started with -l
+
 CAVEATS: For now, you need to use x/y interface format in the NETMAP file, at 
 least for the mapping this script requires. Also, for bridging multiple router
 interfaces, separate instances of this script must be launched, and you need
@@ -173,6 +177,11 @@ my $cap_file;
 my $cap_handle;
 my $cap_dumper;
 my $user_mac;
+my $linkstate;
+my $ls_base;
+my $ls_header;
+my $iou_linkstate_sock;
+my $t1;
 
 GetOptions(
     'help' => sub { print "$help"; exit(0); },
@@ -184,7 +193,8 @@ GetOptions(
     'u=s'  => \$udp_conn,
     't=s'  => \$tap,
     'f=s'  => \$cap_file,
-    'm:s'  => \$user_mac
+    'm:s'  => \$user_mac,
+    'l+'   => \$linkstate
 );
 
 print "iou2net.pl, Version $version, $version_date.\n";
@@ -202,6 +212,7 @@ $verbose = 1 if $debug;
 $uid         = $ENV{SUDO_UID};
 $uid         = $< unless ( defined $uid );    # apparently not started with sudo
 $socket_base = "/tmp/netio$uid";
+mkdir $socket_base, 0755;
 print "UID: $uid\n"                           if $verbose;
 print "Socket base directory: $socket_base\n" if $verbose;
 
@@ -266,7 +277,6 @@ chmod 0666, "$socket_base/$pseudo_instance";
 
 print "Created pseudo IOU socket at $socket_base/$pseudo_instance\n"
   if $verbose;
-
 # attach to real IOU instance
 $iou_router_sock = IO::Socket::UNIX->new(
     Type => SOCK_DGRAM,
@@ -298,6 +308,26 @@ print "Precomputed IOU Header: ", unpack( "H*", $iou_header ), "\n" if $verbose;
 
 # provide a clean exit
 $SIG{INT} = \&caught_sigint;
+
+if ( $linkstate ) {
+    $ls_base = "/tmp/netl$iou_instance"; 
+    # linkstate headers are the same as the IOU header above, 
+    # except for the delimiter which is always 0x0003
+    $ls_header = pack( "nnCCH4",
+        $iou_instance,
+        $pseudo_instance,
+        ( $iou_interface_minor << 4 ) | $iou_interface_major,
+        ( $pseudo_instance_interface_minor << 4 ) |
+          $pseudo_instance_interface_major,
+        "0300" );
+    print "Precomputed IOU Linkstate Header: ", unpack( "H*", $ls_header ), "\n" if $verbose;
+    $iou_linkstate_sock = IO::Socket::UNIX->new(
+        Type => SOCK_DGRAM,
+        Peer => "$ls_base/L1$iou_instance"
+    ) or die "Can't connect to IOU socket at $ls_base/L1$iou_instance\n";
+    print "Attached to real IOU Linkstate socket at $ls_base/L1$iou_instance\n" ;
+    $t1 = threads->create( \&linkstate_thread );
+}
 
 # Open capture file
 if ( defined $cap_file ) {
@@ -553,6 +583,8 @@ sub caught_sigint {
     print "Cleaning up.\n";
     $select_handle->remove( $select_handle->handles );
 
+    $t1->kill('KILL')->detach();
+
     if ( defined $pcap ) {
         Net::Pcap::breakloop($pcap);
         Net::Pcap::close($pcap);
@@ -615,4 +647,17 @@ sub write_pcap_dump {
     ( $header{tv_sec}, $header{tv_usec} ) = gettimeofday();
     Net::Pcap::pcap_dump( $cap_dumper, \%header, $frame );
     Net::Pcap::pcap_dump_flush($cap_dumper);
+}
+
+sub linkstate_thread {
+    # prepare for exitting later
+    $SIG{'KILL'} = sub { threads->exit(); };
+
+    # packet capture between 2 IOU shows that the linkstate packets 
+    # are fired every second
+    while (1) {
+        $iou_linkstate_sock->send(
+            pack( "a*", $ls_header ) );
+        sleep(1);
+    }
 }
